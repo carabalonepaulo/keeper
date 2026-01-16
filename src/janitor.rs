@@ -31,50 +31,44 @@ pub fn worker(
 fn cleanup(root: &Path, shards: &Shards) {
     let now_ts = now();
 
-    let p1_dirs = match std::fs::read_dir(root) {
+    let entries = match std::fs::read_dir(root) {
         Ok(d) => d,
         Err(_) => return,
     };
 
-    for p1_entry in p1_dirs.flatten() {
-        let p1_path = p1_entry.path();
-        if !p1_path.is_dir() {
+    for entry in entries.flatten() {
+        let folder_path = entry.path();
+        if !folder_path.is_dir() {
             continue;
         }
 
-        let p1_name = p1_entry.file_name();
-        let p1_str = p1_name.to_string_lossy();
+        let folder_name = entry.file_name();
+        let name_str = folder_name.to_string_lossy();
 
-        let shard_id = match u8::from_str_radix(&p1_str, 16) {
+        let shard_id = match u16::from_str_radix(&name_str, 16) {
             Ok(id) => id,
             Err(_) => continue,
         };
 
-        let _lock = shards.write(shard_id);
-
-        let Ok(p2_dirs) = std::fs::read_dir(&p1_path) else {
+        let Ok(_lock) = shards.try_write(shard_id) else {
             continue;
         };
 
-        for p2_entry in p2_dirs.flatten() {
-            let p2_path = p2_entry.path();
-            if !p2_path.is_dir() {
+        let Ok(files) = std::fs::read_dir(&folder_path) else {
+            continue;
+        };
+
+        for file_entry in files.flatten() {
+            let file_path = file_entry.path();
+            if !file_path.is_file() {
                 continue;
             }
 
-            let Ok(files) = std::fs::read_dir(&p2_path) else {
-                continue;
-            };
-
-            for file_entry in files.flatten() {
-                let file_path = file_entry.path();
-                if !file_path.is_file() {
-                    continue;
-                }
-
-                if let Ok(true) = is_file_expired(&file_path, now_ts) {
+            match is_file_expired(&file_path, now_ts) {
+                Ok(true) | Err(_) => {
                     let _ = std::fs::remove_file(file_path);
                 }
+                Ok(false) => continue,
             }
         }
     }

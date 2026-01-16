@@ -2,12 +2,16 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crossbeam::channel::Receiver;
 
-use crate::{error::Error, shards::Shards};
+use crate::{
+    error::Error,
+    shards::Shards,
+    utils::{now, parse_hash},
+};
 
 type GetCallback = Box<dyn FnOnce(Result<Vec<u8>, Error>) + Send + Sync + 'static>;
 type Callback = Box<dyn FnOnce(Result<(), Error>) + Send + Sync + 'static>;
@@ -63,13 +67,6 @@ pub fn worker(shards: Shards, input_receiver: Receiver<InputMessage>) {
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
-
 pub fn hash(input: &str) -> Vec<u8> {
     let n = xxhash_rust::xxh3::xxh3_128(input.as_bytes());
     let mut buf = vec![0u8; 32];
@@ -79,13 +76,9 @@ pub fn hash(input: &str) -> Vec<u8> {
 
 fn get(shards: &Shards, path: Arc<PathBuf>, key: String) -> Result<Vec<u8>, Error> {
     let h = hash(&key);
-    let p1 = unsafe { std::str::from_utf8_unchecked(&h[0..2]) };
-    let p2 = unsafe { std::str::from_utf8_unchecked(&h[2..4]) };
-    let filename = unsafe { std::str::from_utf8_unchecked(&h[4..]) };
+    let (p_folder, filename, shard_id) = parse_hash(&h);
 
-    let shard_id = u8::from_str_radix(p1, 16).unwrap_or(0);
-    let file_path = path.join(p1).join(p2).join(filename);
-
+    let file_path = path.join(p_folder).join(filename);
     let _lock = shards.read(shard_id);
 
     let mut file = std::fs::File::open(&file_path)?;
@@ -117,12 +110,9 @@ fn set(
     duration: Option<Duration>,
 ) -> Result<(), Error> {
     let h = hash(&key);
-    let p1 = unsafe { std::str::from_utf8_unchecked(&h[0..2]) };
-    let p2 = unsafe { std::str::from_utf8_unchecked(&h[2..4]) };
-    let filename = unsafe { std::str::from_utf8_unchecked(&h[4..]) };
+    let (p_folder, filename, shard_id) = parse_hash(&h);
 
-    let shard_id = u8::from_str_radix(p1, 16).unwrap_or(0);
-    let folder = path.join(p1).join(p2);
+    let folder = path.join(p_folder);
     let file_path = folder.join(filename);
 
     let expires_at = duration.map(|d| now() + d.as_secs()).unwrap_or(0);
@@ -147,9 +137,9 @@ fn remove(shards: &Shards, path: Arc<PathBuf>, key: String) -> Result<(), Error>
 }
 
 fn clear(shards: &Shards, path: Arc<PathBuf>) -> Result<(), Error> {
-    let mut locks = Vec::with_capacity(256);
-    for i in 0..256 {
-        locks.push(shards.write(i as u8));
+    let mut locks = Vec::with_capacity(4096);
+    for i in 0..4096 {
+        locks.push(shards.write(i as u16));
     }
 
     if path.exists() {
@@ -161,12 +151,8 @@ fn clear(shards: &Shards, path: Arc<PathBuf>) -> Result<(), Error> {
 }
 
 fn remove_with_hash(h: &[u8], shards: &Shards, path: Arc<PathBuf>) -> Result<(), Error> {
-    let p1 = unsafe { std::str::from_utf8_unchecked(&h[0..2]) };
-    let p2 = unsafe { std::str::from_utf8_unchecked(&h[2..4]) };
-    let filename = unsafe { std::str::from_utf8_unchecked(&h[4..]) };
-
-    let shard_id = u8::from_str_radix(p1, 16).unwrap_or(0);
-    let file_path = path.join(p1).join(p2).join(filename);
+    let (p_folder, filename, shard_id) = parse_hash(h);
+    let file_path = path.join(p_folder).join(filename);
 
     let _lock = shards.write(shard_id);
     if file_path.exists() {
