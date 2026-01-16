@@ -8,6 +8,7 @@ use crate::{error::Error, janitor, shards::Shards, store};
 #[cfg(feature = "async")]
 use tokio::sync::oneshot;
 
+#[derive(Debug)]
 struct Inner {
     path: Arc<PathBuf>,
     _lock: Pidlock,
@@ -15,30 +16,72 @@ struct Inner {
     store_is: Sender<store::InputMessage>,
     janitor_is: Sender<janitor::InputMessage>,
 
-    store_handle: Option<JoinHandle<()>>,
+    store_handles: Vec<JoinHandle<()>>,
     janitor_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+pub struct KeeperBuilder {
+    path: PathBuf,
+    cleanup_interval: Duration,
+    store_workers: usize,
+}
+
+impl KeeperBuilder {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cleanup_interval: Duration::from_mins(60),
+            store_workers: 1,
+        }
+    }
+
+    pub fn with_cleanup_interval(mut self, interval: Duration) -> Self {
+        self.cleanup_interval = interval;
+        self
+    }
+
+    pub fn with_store_workers(mut self, count: usize) -> Self {
+        self.store_workers = count.max(1);
+        self
+    }
+
+    pub fn build(self) -> Result<Keeper, Error> {
+        Keeper::new_with_builder(self)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Keeper(Arc<Inner>);
 
 impl Keeper {
-    pub fn new(path: PathBuf, cleanup_interval: Duration) -> Result<Self, Error> {
-        let mut lock = Pidlock::new_validated(path.join(".lock"))?;
+    pub fn new(path: PathBuf) -> Result<Self, Error> {
+        KeeperBuilder::new(path).build()
+    }
+
+    pub fn new_with_builder(builder: KeeperBuilder) -> Result<Self, Error> {
+        let mut lock = Pidlock::new_validated(builder.path.join(".lock"))?;
         lock.acquire()?;
 
-        let path = Arc::new(path);
+        let path = Arc::new(builder.path);
         let shards = Shards::new();
 
         let (store_is, store_ir) = unbounded::<store::InputMessage>();
         let (janitor_is, janitor_ir) = unbounded::<janitor::InputMessage>();
 
-        let store_handle = std::thread::spawn({
-            let shards = shards.clone();
-            move || store::worker(shards, store_ir)
-        });
+        let mut store_handles = Vec::with_capacity(builder.store_workers);
+        for _ in 0..builder.store_workers {
+            let handle = std::thread::spawn({
+                let shards = shards.clone();
+                let ir = store_ir.clone();
+                move || store::worker(shards, ir)
+            });
+            store_handles.push(handle);
+        }
+
         let janitor_handle = std::thread::spawn({
             let path = path.clone();
-            move || janitor::worker(cleanup_interval, path, shards, janitor_ir)
+            move || janitor::worker(builder.cleanup_interval, path, shards, janitor_ir)
         });
 
         let inner = Inner {
@@ -48,7 +91,7 @@ impl Keeper {
             store_is,
             janitor_is,
 
-            store_handle: Some(store_handle),
+            store_handles,
             janitor_handle: Some(janitor_handle),
         };
 
@@ -236,10 +279,13 @@ impl Keeper {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.store_is.send(store::InputMessage::Quit).ok();
+        let num_store_workers = self.store_handles.len();
+        for _ in 0..num_store_workers {
+            self.store_is.send(store::InputMessage::Quit).ok();
+        }
         self.janitor_is.send(janitor::InputMessage::Quit).ok();
 
-        if let Some(handle) = self.store_handle.take() {
+        for handle in self.store_handles.drain(..) {
             handle.join().ok();
         }
 
