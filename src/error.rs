@@ -8,4 +8,6 @@ pub enum Error {
     NotFound,
     #[error("cache data is invalid or corrupted")]
     InvalidData,
+    #[error("worker response channel closed")]
+    WorkerClosed,
 }

@@ -3,6 +3,10 @@ name = "keeper"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+async = ["tokio"]
+sync = []
+
 [dependencies]
 crossbeam = "0.8.4"
 pidlock = "0.2.2"
@@ -10,3 +14,4 @@ slab = "0.4.11"
 thiserror = "2.0.17"
 xxhash-rust = { version = "0.8.12", features = ["xxh3", "const_xxh3"] }
 faster-hex = "0.10.0"
+tokio = { version = "1", features = ["sync"], optional = true }
