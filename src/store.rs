@@ -81,7 +81,7 @@ fn get(shards: &Shards, path: Arc<PathBuf>, key: String) -> Result<Vec<u8>, Erro
     let file_path = path.join(p_folder).join(filename);
     let _lock = shards.read(shard_id);
 
-    let mut file = std::fs::File::open(&file_path)?;
+    let mut file = std::fs::File::open(&file_path).map_err(|_| Error::NotFound)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
