@@ -7,9 +7,12 @@ use std::{
 
 use crossbeam::channel::{Receiver, RecvTimeoutError};
 
-use crate::{shards::Shards, utils::now};
+use crate::{error::Error, shards::Shards, utils::now};
+
+type Callback = Box<dyn FnOnce(Result<(), Error>) + Send + Sync + 'static>;
 
 pub enum InputMessage {
+    Cleanup(Callback),
     Quit,
 }
 
@@ -21,6 +24,10 @@ pub fn worker(
 ) {
     loop {
         match input_receiver.recv_timeout(interval) {
+            Ok(InputMessage::Cleanup(callback)) => {
+                cleanup(&path, &shards);
+                callback(Ok(()));
+            }
             Ok(InputMessage::Quit) => break,
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => cleanup(&path, &shards),

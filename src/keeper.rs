@@ -139,6 +139,15 @@ impl Keeper {
         rx.await.map_err(|_| Error::WorkerClosed)?
     }
 
+    #[cfg(all(feature = "async", not(feature = "sync")))]
+    pub async fn cleanup(&self) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.dispatch_cleanup(move |res| {
+            let _ = tx.send(res);
+        });
+        rx.await.map_err(|_| Error::WorkerClosed)?
+    }
+
     #[cfg(all(feature = "sync", not(feature = "async")))]
     pub fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -175,6 +184,15 @@ impl Keeper {
         rx.recv().map_err(|_| Error::WorkerClosed)?
     }
 
+    #[cfg(all(feature = "sync", not(feature = "async")))]
+    pub fn cleanup(&self) -> Result<(), Error> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.dispatch_cleanup(move |res| {
+            let _ = tx.send(res);
+        });
+        rx.recv().map_err(|_| Error::WorkerClosed)?
+    }
+
     #[cfg(all(not(feature = "async"), not(feature = "sync")))]
     pub fn get<F>(&self, key: &str, cb: F)
     where
@@ -205,6 +223,14 @@ impl Keeper {
         F: FnOnce(Result<(), Error>) + Send + Sync + 'static,
     {
         self.dispatch_clear(cb);
+    }
+
+    #[cfg(all(not(feature = "async"), not(feature = "sync")))]
+    pub fn cleanup<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<(), Error>) + Send + Sync + 'static,
+    {
+        self.dispatch_cleanup(cb);
     }
 
     fn dispatch_get<F>(&self, key: &str, cb: F)
@@ -271,6 +297,18 @@ impl Keeper {
 
         if let Err(e) = self.0.store_is.send(msg) {
             if let store::InputMessage::Clear { callback, .. } = e.0 {
+                callback(Err(Error::WorkerClosed));
+            }
+        }
+    }
+
+    fn dispatch_cleanup<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<(), Error>) + Send + Sync + 'static,
+    {
+        let msg = janitor::InputMessage::Cleanup(Box::new(cb));
+        if let Err(e) = self.0.janitor_is.send(msg) {
+            if let janitor::InputMessage::Cleanup(callback) = e.0 {
                 callback(Err(Error::WorkerClosed));
             }
         }
